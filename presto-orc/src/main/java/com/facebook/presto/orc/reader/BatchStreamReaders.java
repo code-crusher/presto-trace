@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.orc.reader;
 
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.OrcAggregatedMemoryContext;
 import com.facebook.presto.orc.OrcCorruptionException;
@@ -28,6 +29,18 @@ public final class BatchStreamReaders
     }
 
     public static BatchStreamReader createStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext)
+            throws OrcCorruptionException
+    {
+        return createStreamReader(type, streamDescriptor, options, systemMemoryContext, NestedFieldIds.empty());
+    }
+
+    /**
+     * @param fieldIds the Iceberg field IDs of {@code type}'s nested fields, aligned with
+     * the type's structure. When present, struct fields are matched against the file by
+     * field ID (falling back to name when the file carries no IDs), so a re-added or
+     * renamed field reads as null rather than the stale column that reused its name.
+     */
+    public static BatchStreamReader createStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext, NestedFieldIds fieldIds)
             throws OrcCorruptionException
     {
         switch (streamDescriptor.getOrcTypeKind()) {
@@ -54,11 +67,11 @@ public final class BatchStreamReaders
                 boolean enableMicroPrecision = type == TIMESTAMP_MICROSECONDS;
                 return new TimestampBatchStreamReader(type, streamDescriptor, enableMicroPrecision, options.isReadNullForOutOfBoundsTimestamp());
             case LIST:
-                return new ListBatchStreamReader(type, streamDescriptor, options, systemMemoryContext);
+                return new ListBatchStreamReader(type, streamDescriptor, options, systemMemoryContext, fieldIds);
             case STRUCT:
-                return new StructBatchStreamReader(type, streamDescriptor, options, systemMemoryContext);
+                return new StructBatchStreamReader(type, streamDescriptor, options, systemMemoryContext, fieldIds);
             case MAP:
-                return new MapBatchStreamReader(type, streamDescriptor, options, systemMemoryContext);
+                return new MapBatchStreamReader(type, streamDescriptor, options, systemMemoryContext, fieldIds);
             case DECIMAL:
                 return new DecimalBatchStreamReader(type, streamDescriptor);
             case UNION:

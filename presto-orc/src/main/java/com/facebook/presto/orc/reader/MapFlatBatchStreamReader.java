@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.orc.reader;
 
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.BlockBuilder;
 import com.facebook.presto.common.block.DictionaryBlock;
@@ -98,8 +99,9 @@ public class MapFlatBatchStreamReader
 
     private OrcAggregatedMemoryContext systemMemoryContext;
     private final OrcRecordReaderOptions options;
+    private final NestedFieldIds valueFieldIds;
 
-    public MapFlatBatchStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext)
+    public MapFlatBatchStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext, NestedFieldIds fieldIds)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -110,6 +112,7 @@ public class MapFlatBatchStreamReader
         this.keyOrcType = streamDescriptor.getNestedStreams().get(0).getOrcTypeKind();
         this.baseValueStreamDescriptor = streamDescriptor.getNestedStreams().get(1);
         this.options = requireNonNull(options);
+        this.valueFieldIds = fieldIds.childAt(1);
     }
 
     @Override
@@ -256,7 +259,7 @@ public class MapFlatBatchStreamReader
             StreamDescriptor valueStreamDescriptor = baseValueStreamDescriptor.duplicate(sequence);
             valueStreamDescriptors.add(valueStreamDescriptor);
 
-            BatchStreamReader valueStreamReader = BatchStreamReaders.createStreamReader(type.getValueType(), valueStreamDescriptor, options, systemMemoryContext);
+            BatchStreamReader valueStreamReader = BatchStreamReaders.createStreamReader(type.getValueType(), valueStreamDescriptor, options, systemMemoryContext, valueFieldIds);
             valueStreamReader.startStripe(timezone, stripe);
             valueStreamReaders.add(valueStreamReader);
         }

@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static com.facebook.presto.common.type.Decimals.MAX_SHORT_PRECISION;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -215,6 +216,23 @@ public final class ParquetTypeUtils
     }
 
     /**
+     * Returns the child of {@code groupColumnIO} whose Parquet field ID equals {@code fieldId}.
+     * Iceberg data files stamp every field with its Iceberg field ID, so matching by ID
+     * distinguishes a re-added or renamed field from the stale physical column that reused
+     * its name. Returns null when no child carries that ID.
+     */
+    public static ColumnIO lookupColumnByFieldId(GroupColumnIO groupColumnIO, int fieldId)
+    {
+        for (int i = 0; i < groupColumnIO.getChildrenCount(); i++) {
+            ColumnIO child = groupColumnIO.getChild(i);
+            if (child.getType().getId() != null && child.getType().getId().intValue() == fieldId) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    /**
      * For optional fields:
      * definitionLevel == maxDefinitionLevel     => Value is defined
      * definitionLevel == maxDefinitionLevel - 1 => Value is null
@@ -257,7 +275,19 @@ public final class ParquetTypeUtils
 
     public static Optional<org.apache.parquet.schema.Type> getSubfieldType(GroupType baseType, String rootName, List<String> nestedColumnPath)
     {
+        return getSubfieldType(baseType, rootName, nestedColumnPath, ImmutableList.of());
+    }
+
+    /**
+     * @param fieldIds the Iceberg field ID of each element of {@code nestedColumnPath}, aligned
+     * positionally. A nested field is matched against the file by field ID when both are
+     * known (falling back to name only when the file carries no field IDs), so a re-added
+     * or renamed field reads as null rather than the stale column that reused its name.
+     */
+    public static Optional<org.apache.parquet.schema.Type> getSubfieldType(GroupType baseType, String rootName, List<String> nestedColumnPath, List<OptionalInt> fieldIds)
+    {
         checkArgument(nestedColumnPath.size() >= 1, "subfield size is less than 1");
+        checkArgument(fieldIds.size() <= nestedColumnPath.size(), "field IDs do not align with the subfield path: %s vs %s", fieldIds, nestedColumnPath);
         ImmutableList.Builder<org.apache.parquet.schema.Type> typeBuilder = ImmutableList.builder();
 
         org.apache.parquet.schema.Type parentType = getParquetTypeByName(rootName, baseType.asGroupType());
@@ -267,8 +297,10 @@ public final class ParquetTypeUtils
         }
         typeBuilder.add(parentType);
 
-        for (String field : nestedColumnPath) {
-            org.apache.parquet.schema.Type childType = getParquetTypeByName(field, parentType.asGroupType());
+        for (int i = 0; i < nestedColumnPath.size(); i++) {
+            String field = nestedColumnPath.get(i);
+            OptionalInt fieldId = i < fieldIds.size() ? fieldIds.get(i) : OptionalInt.empty();
+            org.apache.parquet.schema.Type childType = getParquetTypeByFieldIdOrName(parentType.asGroupType(), field, fieldId);
             if (childType == null) {
                 return Optional.empty();
             }
@@ -290,6 +322,42 @@ public final class ParquetTypeUtils
             }
             return Optional.of(messageType);
         }
+    }
+
+    /**
+     * Finds a field of a group, preferring a match on Iceberg field ID over a match on
+     * name. ID matching distinguishes a re-added or renamed field (new ID) from the stale
+     * physical field (old ID) that reused its name in the file. Files whose fields carry
+     * no field IDs at all (e.g. migrated tables) fall back to name matching, as do fields
+     * with no known ID. Returns null when the file carries field IDs but none matches: the
+     * field was added after the file was written and reads as null.
+     */
+    private static org.apache.parquet.schema.Type getParquetTypeByFieldIdOrName(GroupType groupType, String name, OptionalInt fieldId)
+    {
+        if (fieldId.isPresent() && hasFieldIds(groupType)) {
+            return getParquetTypeByFieldId(groupType, fieldId.getAsInt());
+        }
+        return getParquetTypeByName(name, groupType);
+    }
+
+    private static boolean hasFieldIds(GroupType groupType)
+    {
+        for (org.apache.parquet.schema.Type field : groupType.getFields()) {
+            if (field.getId() != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static org.apache.parquet.schema.Type getParquetTypeByFieldId(GroupType groupType, int fieldId)
+    {
+        for (org.apache.parquet.schema.Type field : groupType.getFields()) {
+            if (field.getId() != null && field.getId().intValue() == fieldId) {
+                return field;
+            }
+        }
+        return null;
     }
 
     public static List<String> nestedColumnPath(Subfield subfield)

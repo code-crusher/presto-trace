@@ -14,6 +14,7 @@
 package com.facebook.presto.orc;
 
 import com.facebook.airlift.units.DataSize;
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.block.Block;
@@ -376,8 +377,52 @@ public class OrcReader
             int initialBatchSize)
             throws OrcCorruptionException
     {
+        return createBatchRecordReader(includedColumns, ImmutableMap.of(), predicate, offset, length, hiveStorageTimeZone, systemMemoryUsage, initialBatchSize);
+    }
+
+    /**
+     * @param nestedFieldIds the Iceberg field IDs of the nested fields of each included
+     * top-level column, keyed by ORC column ID. When present for a column, its nested
+     * struct fields are matched against the file by field ID (falling back to name only
+     * when the file carries no IDs), so a re-added or renamed field reads as null rather
+     * than the stale column that reused its name.
+     */
+    public OrcBatchRecordReader createBatchRecordReader(
+            Map<Integer, Type> includedColumns,
+            Map<Integer, NestedFieldIds> nestedFieldIds,
+            OrcPredicate predicate,
+            long offset,
+            long length,
+            ZoneId hiveStorageTimeZone,
+            OrcAggregatedMemoryContext systemMemoryUsage,
+            int initialBatchSize)
+            throws OrcCorruptionException
+    {
+        return createBatchRecordReader(
+                includedColumns,
+                nestedFieldIds,
+                predicate,
+                offset,
+                length,
+                DateTimeZone.forTimeZone(TimeZone.getTimeZone(ZoneId.of(hiveStorageTimeZone.getId()))),
+                systemMemoryUsage,
+                initialBatchSize);
+    }
+
+    public OrcBatchRecordReader createBatchRecordReader(
+            Map<Integer, Type> includedColumns,
+            Map<Integer, NestedFieldIds> nestedFieldIds,
+            OrcPredicate predicate,
+            long offset,
+            long length,
+            DateTimeZone hiveStorageTimeZone,
+            OrcAggregatedMemoryContext systemMemoryUsage,
+            int initialBatchSize)
+            throws OrcCorruptionException
+    {
         return new OrcBatchRecordReader(
                 requireNonNull(includedColumns, "includedColumns is null"),
+                requireNonNull(nestedFieldIds, "nestedFieldIds is null"),
                 requireNonNull(predicate, "predicate is null"),
                 footer.getNumberOfRows(),
                 footer.getStripes(),

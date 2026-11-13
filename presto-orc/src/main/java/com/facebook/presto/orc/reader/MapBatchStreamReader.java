@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.orc.reader;
 
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.OrcAggregatedMemoryContext;
@@ -46,12 +47,12 @@ public class MapBatchStreamReader
     private final MapFlatBatchStreamReader flatReader;
     private BatchStreamReader currentReader;
 
-    public MapBatchStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext)
+    public MapBatchStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext, NestedFieldIds fieldIds)
             throws OrcCorruptionException
     {
         this.streamDescriptor = requireNonNull(streamDescriptor, "stream is null");
-        this.directReader = new MapDirectBatchStreamReader(type, streamDescriptor, options, systemMemoryContext);
-        this.flatReader = new MapFlatBatchStreamReader(type, streamDescriptor, options, systemMemoryContext);
+        this.directReader = new MapDirectBatchStreamReader(type, streamDescriptor, options, systemMemoryContext, fieldIds);
+        this.flatReader = new MapFlatBatchStreamReader(type, streamDescriptor, options, systemMemoryContext, fieldIds);
     }
 
     @Override

@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.orc.reader;
 
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.type.MapType;
 import com.facebook.presto.common.type.Type;
@@ -76,7 +77,8 @@ public class MapDirectBatchStreamReader
             Type type,
             StreamDescriptor streamDescriptor,
             OrcRecordReaderOptions options,
-            OrcAggregatedMemoryContext systemMemoryContext)
+            OrcAggregatedMemoryContext systemMemoryContext,
+            NestedFieldIds fieldIds)
             throws OrcCorruptionException
     {
         this.options = requireNonNull(options);
@@ -84,8 +86,8 @@ public class MapDirectBatchStreamReader
         verifyStreamType(streamDescriptor, type, MapType.class::isInstance);
         this.type = (MapType) type;
         this.streamDescriptor = requireNonNull(streamDescriptor, "stream is null");
-        this.keyStreamReader = createStreamReader(this.type.getKeyType(), streamDescriptor.getNestedStreams().get(0), options, systemMemoryContext);
-        this.valueStreamReader = createStreamReader(this.type.getValueType(), streamDescriptor.getNestedStreams().get(1), options, systemMemoryContext);
+        this.keyStreamReader = createStreamReader(this.type.getKeyType(), streamDescriptor.getNestedStreams().get(0), options, systemMemoryContext, fieldIds.childAt(0));
+        this.valueStreamReader = createStreamReader(this.type.getValueType(), streamDescriptor.getNestedStreams().get(1), options, systemMemoryContext, fieldIds.childAt(1));
     }
 
     @Override

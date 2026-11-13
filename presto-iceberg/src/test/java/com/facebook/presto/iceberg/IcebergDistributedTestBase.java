@@ -2772,6 +2772,97 @@ public abstract class IcebergDistributedTestBase
     }
 
     @Test
+    public void testNestedFieldIdResolution()
+    {
+        testWithAllFileFormats(getSession(), this::testNestedFieldIdResolution);
+    }
+
+    private void testNestedFieldIdResolution(Session session, FileFormat fileFormat)
+    {
+        testNestedFieldDropAndReAdd(session, fileFormat);
+        testNestedFieldRename(session, fileFormat);
+        testNestedFieldInArrayDropAndReAdd(session, fileFormat);
+    }
+
+    private void testNestedFieldDropAndReAdd(Session session, FileFormat fileFormat)
+    {
+        String tableName = "test_nested_drop_readd_" + randomTableSuffix();
+        try {
+            assertUpdate(session, "CREATE TABLE " + tableName + " (id INTEGER, info ROW(age INTEGER)) WITH (\"write.format.default\" = '" + fileFormat + "')");
+            assertUpdate(session, "INSERT INTO " + tableName + " VALUES (1, ROW(30))", 1);
+            assertQuery(session, "SELECT info.age FROM " + tableName, "VALUES 30");
+
+            // Drop and re-add the nested field through the Iceberg API. The re-added field
+            // gets a new field ID, so existing rows must read as null: the physical 'age'
+            // column in the data file belongs to the dropped field. Spark and other
+            // Iceberg-compliant engines resolve this by field ID; the readers must too.
+            Table icebergTable = loadTable(tableName);
+            icebergTable.updateSchema().deleteColumn("info.age").commit();
+            icebergTable.updateSchema().addColumn("info", "age", Types.IntegerType.get()).commit();
+
+            assertQuery(session, "SELECT info.age FROM " + tableName, "VALUES NULL");
+
+            // New data written after the re-add carries the new field ID and reads back
+            assertUpdate(session, "INSERT INTO " + tableName + " VALUES (2, ROW(42))", 1);
+            assertQuery(session, "SELECT id, info.age FROM " + tableName + " ORDER BY id", "VALUES (1, NULL), (2, 42)");
+        }
+        finally {
+            assertQuerySucceeds(session, "DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    private void testNestedFieldRename(Session session, FileFormat fileFormat)
+    {
+        String tableName = "test_nested_rename_" + randomTableSuffix();
+        try {
+            assertUpdate(session, "CREATE TABLE " + tableName + " (id INTEGER, info ROW(age INTEGER)) WITH (\"write.format.default\" = '" + fileFormat + "')");
+            assertUpdate(session, "INSERT INTO " + tableName + " VALUES (1, ROW(30))", 1);
+
+            // A rename keeps the original field ID, so existing rows must still read the
+            // old physical column under the new name.
+            Table icebergTable = loadTable(tableName);
+            icebergTable.updateSchema().renameColumn("info.age", "years").commit();
+
+            assertQuery(session, "SELECT info.years FROM " + tableName, "VALUES 30");
+
+            // Re-adding the old name creates a distinct field with a new ID: existing rows
+            // read null instead of the pre-rename value.
+            icebergTable.updateSchema().addColumn("info", "age", Types.IntegerType.get()).commit();
+            assertQuery(session, "SELECT info.years, info.age FROM " + tableName, "VALUES (30, NULL)");
+
+            assertUpdate(session, "INSERT INTO " + tableName + " VALUES (2, ROW(50, 7))", 1);
+            assertQuery(session, "SELECT id, info.years, info.age FROM " + tableName + " ORDER BY id", "VALUES (1, 30, NULL), (2, 50, 7)");
+        }
+        finally {
+            assertQuerySucceeds(session, "DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    private void testNestedFieldInArrayDropAndReAdd(Session session, FileFormat fileFormat)
+    {
+        String tableName = "test_nested_array_drop_readd_" + randomTableSuffix();
+        try {
+            assertUpdate(session, "CREATE TABLE " + tableName
+                    + " (id INTEGER, items ARRAY(ROW(name VARCHAR, num INTEGER))) WITH (\"write.format.default\" = '" + fileFormat + "')");
+            assertUpdate(session, "INSERT INTO " + tableName + " VALUES (1, ARRAY[ROW('a', 1)])", 1);
+
+            // Drop and re-add a field nested inside the array element struct: the re-added
+            // field has a new ID, so the existing row reads null for it.
+            Table icebergTable = loadTable(tableName);
+            icebergTable.updateSchema().deleteColumn("items.num").commit();
+            icebergTable.updateSchema().addColumn("items", "num", Types.IntegerType.get()).commit();
+
+            assertQuery(session, "SELECT items[1].name, items[1].num FROM " + tableName, "VALUES ('a', NULL)");
+
+            assertUpdate(session, "INSERT INTO " + tableName + " VALUES (2, ARRAY[ROW('b', 5)])", 1);
+            assertQuery(session, "SELECT id, items[1].name, items[1].num FROM " + tableName + " ORDER BY id", "VALUES (1, 'a', NULL), (2, 'b', 5)");
+        }
+        finally {
+            assertQuerySucceeds(session, "DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
     public void testQueryBranch()
     {
         assertUpdate("CREATE TABLE test_branch_dot_notation (id BIGINT, name VARCHAR, value BIGINT)");

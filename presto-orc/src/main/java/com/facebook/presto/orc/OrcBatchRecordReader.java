@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.orc;
 
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.block.Block;
@@ -44,6 +45,7 @@ public class OrcBatchRecordReader
 
     public OrcBatchRecordReader(
             Map<Integer, Type> includedColumns,
+            Map<Integer, NestedFieldIds> nestedFieldIds,
             OrcPredicate predicate,
             long numberOfRows,
             List<StripeInformation> fileStripes,
@@ -80,7 +82,7 @@ public class OrcBatchRecordReader
                 // doesn't have a local buffer. All non-leaf level StreamReaders' (e.g. MapStreamReader, LongStreamReader,
                 // ListStreamReader and StructStreamReader) instance sizes were not counted, because calling setBytes() in
                 // their constructors is confusing.
-                createStreamReaders(orcDataSource, types, options, includedColumns, systemMemoryUsage.newOrcAggregatedMemoryContext()),
+                createStreamReaders(orcDataSource, types, options, includedColumns, nestedFieldIds, systemMemoryUsage.newOrcAggregatedMemoryContext()),
                 predicate,
                 numberOfRows,
                 fileStripes,
@@ -156,6 +158,7 @@ public class OrcBatchRecordReader
             List<OrcType> types,
             OrcRecordReaderOptions options,
             Map<Integer, Type> includedColumns,
+            Map<Integer, NestedFieldIds> nestedFieldIds,
             OrcAggregatedMemoryContext systemMemoryContext)
             throws OrcCorruptionException
     {
@@ -168,7 +171,8 @@ public class OrcBatchRecordReader
                 Type type = includedColumns.get(columnId);
                 if (type != null) {
                     StreamDescriptor streamDescriptor = streamDescriptors.get(columnId);
-                    streamReaders[columnId] = BatchStreamReaders.createStreamReader(type, streamDescriptor, options, systemMemoryContext);
+                    NestedFieldIds columnFieldIds = nestedFieldIds.getOrDefault(columnId, NestedFieldIds.empty());
+                    streamReaders[columnId] = BatchStreamReaders.createStreamReader(type, streamDescriptor, options, systemMemoryContext, columnFieldIds);
                 }
             }
         }

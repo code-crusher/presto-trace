@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.orc.reader;
 
+import com.facebook.presto.common.NestedFieldIds;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.RowBlock;
 import com.facebook.presto.common.block.RunLengthEncodedBlock;
@@ -42,12 +43,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.PRESENT;
 import static com.facebook.presto.orc.reader.BatchStreamReaders.createStreamReader;
 import static com.facebook.presto.orc.reader.ReaderUtils.verifyStreamType;
 import static com.facebook.presto.orc.stream.MissingInputStreamSource.getBooleanMissingStreamSource;
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static java.util.Objects.requireNonNull;
 
@@ -71,7 +74,7 @@ public class StructBatchStreamReader
 
     private boolean rowGroupOpen;
 
-    StructBatchStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext)
+    StructBatchStreamReader(Type type, StreamDescriptor streamDescriptor, OrcRecordReaderOptions options, OrcAggregatedMemoryContext systemMemoryContext, NestedFieldIds fieldIds)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -79,19 +82,28 @@ public class StructBatchStreamReader
         this.type = (RowType) type;
         this.streamDescriptor = requireNonNull(streamDescriptor, "stream is null");
 
+        List<StreamDescriptor> nestedStreamList = streamDescriptor.getNestedStreams();
+        boolean fileHasFieldIds = nestedStreamList.stream().anyMatch(stream -> getIcebergFieldId(stream).isPresent());
         Map<String, StreamDescriptor> nestedStreams = Maps.uniqueIndex(
-                streamDescriptor.getNestedStreams(), stream -> stream.getFieldName().toLowerCase(Locale.ENGLISH));
+                nestedStreamList, stream -> stream.getFieldName().toLowerCase(Locale.ENGLISH));
         ImmutableList.Builder<String> fieldNames = ImmutableList.builder();
         ImmutableMap.Builder<String, BatchStreamReader> structFields = ImmutableMap.builder();
-        for (Field field : this.type.getFields()) {
+        List<RowType.Field> rowFields = this.type.getFields();
+        checkArgument(fieldIds.getChildren().isEmpty() || fieldIds.getChildren().size() == rowFields.size(),
+                "field IDs do not align with the ROW type: expected %s children, got %s",
+                rowFields.size(), fieldIds.getChildren().size());
+        for (int fieldIndex = 0; fieldIndex < rowFields.size(); fieldIndex++) {
+            Field field = rowFields.get(fieldIndex);
             String fieldName = field.getName()
                     .orElseThrow(() -> new IllegalArgumentException("ROW type does not have field names declared: " + type))
                     .toLowerCase(Locale.ENGLISH);
             fieldNames.add(fieldName);
 
-            StreamDescriptor fieldStream = nestedStreams.get(fieldName);
+            NestedFieldIds childIds = fieldIds.childAt(fieldIndex);
+            StreamDescriptor fieldStream = findFieldStream(
+                    nestedStreams, fieldName, childIds, fileHasFieldIds);
             if (fieldStream != null) {
-                structFields.put(fieldName, createStreamReader(field.getType(), fieldStream, options, systemMemoryContext));
+                structFields.put(fieldName, createStreamReader(field.getType(), fieldStream, options, systemMemoryContext, childIds));
             }
         }
         this.fieldNames = fieldNames.build();
@@ -240,6 +252,49 @@ public class StructBatchStreamReader
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Finds the physical stream of a struct field, preferring a match on Iceberg field ID
+     * over a match on name. ID matching distinguishes a re-added or renamed field (new
+     * ID) from the stale physical column (old ID) that reused its name in the file.
+     * Files whose columns carry no field IDs at all (e.g. migrated tables) fall back to
+     * name matching, as do fields with no known ID.
+     */
+    private static StreamDescriptor findFieldStream(
+            Map<String, StreamDescriptor> nestedStreams,
+            String fieldName,
+            NestedFieldIds fieldId,
+            boolean fileHasFieldIds)
+    {
+        if (fieldId.getId().isPresent() && fileHasFieldIds) {
+            for (StreamDescriptor stream : nestedStreams.values()) {
+                OptionalInt id = getIcebergFieldId(stream);
+                if (id.isPresent() && id.getAsInt() == fieldId.getId().getAsInt()) {
+                    return stream;
+                }
+            }
+            // The file's columns carry field IDs but none matches this field's ID: the
+            // field was added after the file was written. Read nulls rather than
+            // falling back to the name, which may hit the stale column of a dropped
+            // field that reused the name.
+            return null;
+        }
+        return nestedStreams.get(fieldName);
+    }
+
+    private static OptionalInt getIcebergFieldId(StreamDescriptor streamDescriptor)
+    {
+        String id = streamDescriptor.getOrcType().getAttributes().get("iceberg.id");
+        if (id == null) {
+            return OptionalInt.empty();
+        }
+        try {
+            return OptionalInt.of(Integer.parseInt(id));
+        }
+        catch (NumberFormatException e) {
+            return OptionalInt.empty();
         }
     }
 
