@@ -189,6 +189,93 @@ public class TestSfmSketch
     }
 
     @Test
+    public void testMergePrivateBitProbabilities()
+    {
+        // The randomized merge should be distributionally equivalent to taking the OR of the
+        // underlying non-private sketches and then applying randomized response with the merged
+        // probability. For every combination of underlying true bits, average the merge probability
+        // over the (noisy) input bits it could observe and check it matches that ideal.
+        for (double epsilon1 : new double[] {1, 2, 3}) {
+            for (double epsilon2 : new double[] {1, 2, 3}) {
+                double p1 = SfmSketch.getRandomizedResponseProbability(epsilon1);
+                double p2 = SfmSketch.getRandomizedResponseProbability(epsilon2);
+                double p = SfmSketch.mergeRandomizedResponseProbabilities(p1, p2);
+
+                for (int trueBit1 = 0; trueBit1 <= 1; trueBit1++) {
+                    for (int trueBit2 = 0; trueBit2 <= 1; trueBit2++) {
+                        double expectedProbability = (trueBit1 | trueBit2) == 1 ? 1 - p : p;
+                        double actualProbability = 0;
+                        for (int observedBit1 = 0; observedBit1 <= 1; observedBit1++) {
+                            for (int observedBit2 = 0; observedBit2 <= 1; observedBit2++) {
+                                // Probability of observing each bit under randomized response.
+                                double observedProbability =
+                                        (observedBit1 == trueBit1 ? 1 - p1 : p1) * (observedBit2 == trueBit2 ? 1 - p2 : p2);
+                                double mergeProbability = getMergeBitProbability(
+                                        epsilon1, epsilon2, observedBit1, observedBit2);
+                                actualProbability += observedProbability * mergeProbability;
+                            }
+                        }
+                        assertEquals(actualProbability, expectedProbability, 1E-9,
+                                "epsilon1=" + epsilon1 + " epsilon2=" + epsilon2 +
+                                        " trueBit1=" + trueBit1 + " trueBit2=" + trueBit2);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns the probability that the randomized merge of two private sketches sets a bit, given
+     * that the sketches currently hold the specified (already randomized) bit values.
+     */
+    private static double getMergeBitProbability(double epsilon1, double epsilon2, int bit1, int bit2)
+    {
+        SfmSketch sketch = SfmSketch.create(32, 1);
+        SfmSketch sketch2 = SfmSketch.create(32, 1);
+        // Set the bit patterns before enabling privacy, then use a never-flip strategy so that
+        // enabling privacy records the epsilon without altering the bits.
+        sketch.getBitmap().setBit(0, bit1 == 1);
+        sketch2.getBitmap().setBit(0, bit2 == 1);
+        sketch.enablePrivacy(epsilon1, new TestingNeverFlipRandomizationStrategy());
+        sketch2.enablePrivacy(epsilon2, new TestingNeverFlipRandomizationStrategy());
+
+        TestingRecordingRandomizationStrategy recordingStrategy = new TestingRecordingRandomizationStrategy();
+        sketch.mergeWith(sketch2, recordingStrategy);
+        return recordingStrategy.getProbabilities().get(0);
+    }
+
+    @Test
+    public void testMergedCardinalityUnbiased()
+    {
+        // Merging two disjoint private sketches should estimate the cardinality of their union.
+        // A buggy merge formula produces too many 1-bits, biasing the estimate upward, which is
+        // most pronounced at low epsilon. Average over several seeds to reduce variance.
+        int numPerSketch = 10_000;
+        int totalCardinality = 2 * numPerSketch;
+        int runs = 10;
+        for (double epsilon : new double[] {1, 2, 5}) {
+            double sumEstimates = 0;
+            for (int run = 0; run < runs; run++) {
+                SfmSketch sketch = SfmSketch.create(4096, 24);
+                SfmSketch sketch2 = SfmSketch.create(4096, 24);
+                for (int i = 0; i < numPerSketch; i++) {
+                    sketch.add(i);
+                    sketch2.add(numPerSketch + i);
+                }
+                sketch.enablePrivacy(epsilon, new TestingSeededRandomizationStrategy(2 * run + 1));
+                sketch2.enablePrivacy(epsilon, new TestingSeededRandomizationStrategy(2 * run + 2));
+                sketch.mergeWith(sketch2, new TestingSeededRandomizationStrategy(1000 + run));
+                sumEstimates += sketch.cardinality();
+            }
+            double averageEstimate = sumEstimates / runs;
+            // Tolerances are ~6x the theoretical standard error of the average of the runs.
+            double relativeTolerance = epsilon == 1 ? 0.10 : (epsilon == 2 ? 0.04 : 0.02);
+            assertEquals(averageEstimate, totalCardinality, totalCardinality * relativeTolerance,
+                    "epsilon=" + epsilon + " averageEstimate=" + averageEstimate);
+        }
+    }
+
+    @Test
     public void testMergeMixed()
     {
         SfmSketch sketch = SfmSketch.create(4096, 24);
