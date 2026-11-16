@@ -1400,6 +1400,39 @@ public class TestHiveIntegrationSmokeTest
     }
 
     @Test
+    public void testCreateEmptyNonBucketedPartitionWithNullValue()
+    {
+        testCreateEmptyNonBucketedPartitionWithNullValue(false);
+        testCreateEmptyNonBucketedPartitionWithNullValue(true);
+    }
+
+    public void testCreateEmptyNonBucketedPartitionWithNullValue(boolean optimizedPartitionUpdateSerializationEnabled)
+    {
+        String tableName = "test_insert_empty_partitioned_unbucketed_table_with_null_value";
+        assertUpdate("" +
+                "CREATE TABLE " + tableName + " (" +
+                "  dummy_col bigint," +
+                "  part varchar)" +
+                "WITH (" +
+                "  format = 'ORC', " +
+                "  partitioned_by = ARRAY[ 'part' ] " +
+                ")");
+        assertQuery(format("SELECT count(*) FROM \"%s$partitions\"", tableName), "SELECT 0");
+
+        // create an empty partition with a NULL partition value
+        assertUpdate(
+                Session.builder(getSession())
+                        .setCatalogSessionProperty(catalog, OPTIMIZED_PARTITION_UPDATE_SERIALIZATION_ENABLED, optimizedPartitionUpdateSerializationEnabled + "")
+                        .build(),
+                format("CALL system.create_empty_partition('%s', '%s', ARRAY['part'], ARRAY[NULL])", TPCH_SCHEMA, tableName));
+        assertQuery(format("SELECT count(*) FROM \"%s$partitions\"", tableName), "SELECT 1");
+        assertQuery(
+                format("SELECT * FROM \"%s$partitions\"", tableName),
+                "SELECT NULL");
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
     public void testCreateEmptyUnpartitionedBucketedTable()
     {
         String tableName = "test_create_empty_bucketed_table";
