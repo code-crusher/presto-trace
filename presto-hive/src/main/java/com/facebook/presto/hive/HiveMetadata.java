@@ -3041,6 +3041,12 @@ public class HiveMetadata
         // combine subfieldPredicate with remainingPredicate
         RowExpression combinedRemainingPredicate = getCombinedRemainingPredicate(hiveLayoutHandle, subfieldPredicate);
 
+        // $row_id is synthesized from the row number within a file and the file name. For transactional
+        // tables the metastore also supplies a row ID partition component, which makes the value unique
+        // across files that hold the same logical row. Without it (i.e. for non-transactional tables)
+        // $row_id is not guaranteed to be unique, so it must not be advertised as the unique column.
+        Optional<ColumnHandle> uniqueColumn = isTransactionalTable(table.getParameters()) ? Optional.of(rowIdColumnHandle()) : Optional.empty();
+
         return new ConnectorTableLayout(
                 hiveLayoutHandle,
                 Optional.empty(),
@@ -3050,7 +3056,7 @@ public class HiveMetadata
                 discretePredicates,
                 localPropertyBuilder.build(),
                 Optional.of(combinedRemainingPredicate),
-                Optional.of(rowIdColumnHandle()));
+                uniqueColumn);
     }
 
     @Override
