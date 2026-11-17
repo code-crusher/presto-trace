@@ -25,7 +25,7 @@ import static java.util.Objects.requireNonNull;
 public final class CallArgument
         extends Node
 {
-    private final Optional<String> name;
+    private final Optional<Identifier> name;
     private final Expression value;
 
     public CallArgument(Expression value)
@@ -40,22 +40,32 @@ public final class CallArgument
 
     public CallArgument(String name, Expression value)
     {
+        this(Optional.empty(), Optional.of(new Identifier(name)), value);
+    }
+
+    public CallArgument(Identifier name, Expression value)
+    {
         this(Optional.empty(), Optional.of(name), value);
     }
 
     public CallArgument(NodeLocation location, String name, Expression value)
     {
+        this(Optional.of(location), Optional.of(new Identifier(name)), value);
+    }
+
+    public CallArgument(NodeLocation location, Identifier name, Expression value)
+    {
         this(Optional.of(location), Optional.of(name), value);
     }
 
-    public CallArgument(Optional<NodeLocation> location, Optional<String> name, Expression value)
+    public CallArgument(Optional<NodeLocation> location, Optional<Identifier> name, Expression value)
     {
         super(location);
         this.name = requireNonNull(name, "name is null");
         this.value = requireNonNull(value, "value is null");
     }
 
-    public Optional<String> getName()
+    public Optional<Identifier> getName()
     {
         return name;
     }

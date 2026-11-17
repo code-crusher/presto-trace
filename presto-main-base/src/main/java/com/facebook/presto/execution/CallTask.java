@@ -33,6 +33,7 @@ import com.facebook.presto.sql.tree.CallArgument;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.ExpressionTreeRewriter;
 import com.facebook.presto.sql.tree.FunctionCall;
+import com.facebook.presto.sql.tree.Identifier;
 import com.facebook.presto.sql.tree.NodeRef;
 import com.facebook.presto.sql.tree.Parameter;
 import com.facebook.presto.sql.tree.QualifiedName;
@@ -69,6 +70,7 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.lang.String.format;
 import static java.util.Arrays.asList;
+import static java.util.Locale.ENGLISH;
 
 public class CallTask
         implements DDLDefinitionTask<Call>
@@ -133,10 +135,11 @@ public class CallTask
 
     public static Object[] extractParameterValuesInOrder(Call call, BaseProcedure<?> procedure, Metadata metadata, Session session, Map<NodeRef<Parameter>, Expression> parameterLookup)
     {
-        // map declared argument names to positions
+        // map declared argument names to positions; argument names follow SQL identifier
+        // rules, so unquoted names are matched case-insensitively
         Map<String, Integer> positions = new HashMap<>();
         for (int i = 0; i < procedure.getArguments().size(); i++) {
-            positions.put(procedure.getArguments().get(i).getName(), i);
+            positions.put(procedure.getArguments().get(i).getName().toLowerCase(ENGLISH), i);
         }
 
         // per specification, do not allow mixing argument types
@@ -152,16 +155,17 @@ public class CallTask
         for (int i = 0; i < call.getArguments().size(); i++) {
             CallArgument argument = call.getArguments().get(i);
             if (argument.getName().isPresent()) {
-                String name = argument.getName().get();
+                Identifier identifier = argument.getName().get();
+                String name = identifier.isDelimited() ? identifier.getValue() : identifier.getValueLowerCase();
                 if (names.put(name, argument) != null) {
                     throw new SemanticException(INVALID_PROCEDURE_ARGUMENTS, argument, "Duplicate procedure argument: %s", name);
                 }
                 if (!positions.containsKey(name)) {
-                    throw new SemanticException(INVALID_PROCEDURE_ARGUMENTS, argument, "Unknown argument name: %s", name);
+                    throw new SemanticException(INVALID_PROCEDURE_ARGUMENTS, argument, "Unknown argument name: %s", identifier.getValue());
                 }
             }
             else if (i < procedure.getArguments().size()) {
-                names.put(procedure.getArguments().get(i).getName(), argument);
+                names.put(procedure.getArguments().get(i).getName().toLowerCase(ENGLISH), argument);
             }
             else {
                 throw new SemanticException(INVALID_PROCEDURE_ARGUMENTS, call, "Too many arguments for procedure");
@@ -170,7 +174,7 @@ public class CallTask
 
         procedure.getArguments().stream()
                 .filter(BaseArgument::isRequired)
-                .filter(argument -> !names.containsKey(argument.getName()))
+                .filter(argument -> !names.containsKey(argument.getName().toLowerCase(ENGLISH)))
                 .map(BaseArgument::getName)
                 .findFirst()
                 .ifPresent(argument -> {
@@ -197,7 +201,7 @@ public class CallTask
         for (int i = 0; i < procedure.getArguments().size(); i++) {
             BaseArgument argument = procedure.getArguments().get(i);
 
-            if (!names.containsKey(argument.getName())) {
+            if (!names.containsKey(argument.getName().toLowerCase(ENGLISH))) {
                 verify(argument.isOptional());
                 values[i] = toTypeObjectValue(session, metadata.getType(argument.getType()), argument.getDefaultValue());
             }

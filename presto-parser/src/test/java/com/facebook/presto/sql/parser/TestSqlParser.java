@@ -3200,6 +3200,10 @@ public class TestSqlParser
                 new CallArgument("a", new LongLiteral("1")),
                 new CallArgument("b", new StringLiteral("go")),
                 new CallArgument(new LongLiteral("456")))));
+        assertStatement("CALL foo(A => 1)", new Call(QualifiedName.of("foo"), ImmutableList.of(
+                new CallArgument(identifier("A"), new LongLiteral("1")))));
+        assertStatement("CALL foo(\"a\" => 1)", new Call(QualifiedName.of("foo"), ImmutableList.of(
+                new CallArgument(quotedIdentifier("a"), new LongLiteral("1")))));
     }
 
     @Test

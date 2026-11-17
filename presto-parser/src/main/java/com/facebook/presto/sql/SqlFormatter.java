@@ -1688,7 +1688,7 @@ public final class SqlFormatter
         protected Void visitCallArgument(CallArgument node, Integer indent)
         {
             if (node.getName().isPresent()) {
-                builder.append(node.getName().get())
+                builder.append(formatName(node.getName().get()))
                         .append(" => ");
             }
             builder.append(formatExpression(node.getValue(), parameters));
