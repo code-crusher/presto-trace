@@ -33,6 +33,13 @@ velox::TypePtr stringToType(
 template <velox::TypeKind KIND>
 velox::TypePtr fieldNamesToLowerCase(const velox::TypePtr& type);
 
+/// Converts a Presto domain into a Velox scan filter.
+///
+/// Returns nullptr when the predicate cannot be evaluated by a Velox scan
+/// filter, which is the case for a range predicate on a structural type
+/// (ARRAY, MAP or ROW): Velox only accepts IS NULL and IS NOT NULL there. The
+/// caller must leave such a domain out of the pushed down filters, so that the
+/// remaining filter evaluates it instead.
 std::unique_ptr<velox::common::Filter> toFilter(
     const protocol::Domain& domain,
     const VeloxExprConverter& exprConverter,

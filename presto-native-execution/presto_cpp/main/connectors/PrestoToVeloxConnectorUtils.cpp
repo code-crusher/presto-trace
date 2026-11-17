@@ -637,6 +637,29 @@ template TypePtr fieldNamesToLowerCase<TypeKind::HUGEINT>(const TypePtr&);
 // Iceberg V3 unknown columns have no field names; return the type as-is.
 template TypePtr fieldNamesToLowerCase<TypeKind::UNKNOWN>(const TypePtr&);
 
+namespace {
+
+/// Returns true for the structural types whose values Velox cannot compare
+/// inside a scan filter. Velox only allows IS NULL and IS NOT NULL filters on
+/// ARRAY, MAP and ROW columns; any other filter trips a check in
+/// ScanSpec::filterRows.
+bool isStructuralType(const TypePtr& type) {
+  return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
+      type->kind() == TypeKind::ROW;
+}
+
+/// Returns true if 'range' covers every non-null value, which Presto sends for
+/// 'IS NOT NULL'.
+bool isUnboundedRange(const protocol::Range& range) {
+  bool lowExclusive = range.low.bound == protocol::Bound::ABOVE;
+  bool lowUnbounded = range.low.valueBlock == nullptr && lowExclusive;
+  bool highExclusive = range.high.bound == protocol::Bound::BELOW;
+  bool highUnbounded = range.high.valueBlock == nullptr && highExclusive;
+  return lowUnbounded && highUnbounded;
+}
+
+} // namespace
+
 std::unique_ptr<common::Filter> toFilter(
     const protocol::Domain& domain,
     const VeloxExprConverter& exprConverter,
@@ -656,16 +679,26 @@ std::unique_ptr<common::Filter> toFilter(
       // 'is not null' arrives as unbounded range with 'nulls not allowed'.
       // We catch this case and create 'is not null' filter instead of the range
       // filter.
-      const auto& range = ranges[0];
-      bool lowExclusive = range.low.bound == protocol::Bound::ABOVE;
-      bool lowUnbounded = range.low.valueBlock == nullptr && lowExclusive;
-      bool highExclusive = range.high.bound == protocol::Bound::BELOW;
-      bool highUnbounded = range.high.valueBlock == nullptr && highExclusive;
-      if (lowUnbounded && highUnbounded && !nullAllowed) {
+      if (isUnboundedRange(ranges[0]) && !nullAllowed) {
         return std::make_unique<common::IsNotNull>();
       }
 
+      // An ARRAY, MAP or ROW type is comparable in Presto, so an equality
+      // predicate on such a column arrives as a range set rather than an
+      // EquatableValueSet. Velox cannot express that predicate as a scan
+      // filter: it has no range filter for these types and its scan only
+      // accepts null filters on them. Report the domain as not pushable so the
+      // remaining filter evaluates it.
+      if (isStructuralType(type)) {
+        return nullptr;
+      }
+
       return toFilter(type, ranges[0], nullAllowed, exprConverter);
+    }
+
+    // A multi-range predicate on a structural type is likewise not pushable.
+    if (isStructuralType(type)) {
+      return nullptr;
     }
 
     if (type->isDate()) {
@@ -860,9 +893,12 @@ std::unique_ptr<velox::connector::ConnectorTableHandle> toHiveTableHandle(
   common::SubfieldFilters subfieldFilters;
   auto domains = domainPredicate.domains;
   for (const auto& domain : *domains) {
-    auto filter = domain.second;
-    subfieldFilters[common::Subfield(domain.first)] =
-        toFilter(domain.second, exprConverter, typeParser);
+    auto filter = toFilter(domain.second, exprConverter, typeParser);
+    // Domains Velox cannot evaluate in the scan are left to the remaining
+    // filter.
+    if (filter != nullptr) {
+      subfieldFilters[common::Subfield(domain.first)] = std::move(filter);
+    }
   }
 
   auto remainingFilter = exprConverter.toVeloxExpr(remainingPredicate);

@@ -31,6 +31,7 @@
 #include "velox/connectors/hive/iceberg/IcebergTableHandle.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/type/Filter.h"
+#include "velox/vector/ComplexVector.h"
 
 using namespace facebook::presto;
 using namespace facebook::velox;
@@ -291,6 +292,31 @@ std::shared_ptr<protocol::Block> serializeToBlock(
   auto block = std::make_shared<protocol::Block>();
   block->data = encoding::Base64::encode(serialized.c_str(), serialized.size());
   return block;
+}
+
+// Serializes a single-row ARRAY<INTEGER> block holding 'elements', the shape
+// Presto sends as the bound of a range predicate on an array column.
+std::shared_ptr<protocol::Block> serializeArrayIntBlock(
+    const std::vector<int32_t>& elements,
+    memory::MemoryPool* pool) {
+  const auto numElements = static_cast<vector_size_t>(elements.size());
+  auto elementVector = BaseVector::create(INTEGER(), numElements, pool);
+  auto* flatElements = elementVector->asFlatVector<int32_t>();
+  for (vector_size_t i = 0; i < numElements; ++i) {
+    flatElements->set(i, elements[i]);
+  }
+
+  auto offsets = AlignedBuffer::allocate<vector_size_t>(1, pool, 0);
+  auto sizes = AlignedBuffer::allocate<vector_size_t>(1, pool, numElements);
+  auto arrayVector = std::make_shared<ArrayVector>(
+      pool,
+      ARRAY(INTEGER()),
+      nullptr,
+      1,
+      offsets,
+      sizes,
+      elementVector);
+  return serializeToBlock(arrayVector, pool);
 }
 
 protocol::Domain createSingleRangeDomain(
@@ -910,6 +936,97 @@ TEST_F(PrestoToVeloxConnectorTest, allOrNoneValueSet) {
   auto all = toFilter(makeDomain(true, true), *exprConverter_, *typeParser_);
   EXPECT_EQ(all->kind(), common::FilterKind::kAlwaysTrue);
   EXPECT_TRUE(all->testNull());
+}
+
+// An ARRAY is orderable in Presto, so 'array_col = array[10, 20]' arrives as a
+// SortedRangeSet instead of an EquatableValueSet. Velox has no range filter for
+// a structural type and only accepts null filters on those columns, so the
+// domain must be reported as not pushable instead of failing the conversion.
+TEST_F(PrestoToVeloxConnectorTest, arrayRangeDomainIsNotPushable) {
+  auto bound = serializeArrayIntBlock({10, 20}, pool_.get());
+  auto domain = createSingleRangeDomain(
+      "array(integer)",
+      bound,
+      protocol::Bound::EXACTLY,
+      bound,
+      protocol::Bound::EXACTLY,
+      false);
+
+  EXPECT_EQ(toFilter(domain, *exprConverter_, *typeParser_), nullptr);
+}
+
+// IS NULL and IS NOT NULL on an array column are still pushable, since Velox
+// accepts null filters on structural types.
+TEST_F(PrestoToVeloxConnectorTest, arrayNullDomainsArePushable) {
+  // 'IS NULL' arrives as an empty range set that allows nulls.
+  auto emptyRangeSet = std::make_shared<protocol::SortedRangeSet>();
+  emptyRangeSet->type = "array(integer)";
+  protocol::Domain isNullDomain;
+  isNullDomain.values = emptyRangeSet;
+  isNullDomain.nullAllowed = true;
+
+  auto isNull = toFilter(isNullDomain, *exprConverter_, *typeParser_);
+  ASSERT_NE(isNull, nullptr);
+  EXPECT_EQ(isNull->kind(), common::FilterKind::kIsNull);
+
+  auto isNotNull = toFilter(
+      createSingleRangeDomain(
+          "array(integer)",
+          nullptr,
+          protocol::Bound::ABOVE,
+          nullptr,
+          protocol::Bound::BELOW,
+          false),
+      *exprConverter_,
+      *typeParser_);
+  ASSERT_NE(isNotNull, nullptr);
+  EXPECT_EQ(isNotNull->kind(), common::FilterKind::kIsNotNull);
+}
+
+// The table handle conversion must skip an unpushable array domain rather than
+// fail, and still convert the other domains.
+TEST_F(PrestoToVeloxConnectorTest, icebergArrayEqualityDomainIsSkipped) {
+  constexpr auto kArrayColumnName = "vector_int_col";
+  auto layout = std::make_shared<protocol::iceberg::IcebergTableLayoutHandle>();
+  setCommonLayoutProperties(
+      layout, createTestDataColumns(), createTrueConstant());
+
+  auto bound = serializeArrayIntBlock({10, 20, 30, 40, 50}, pool_.get());
+  layout->domainPredicate.domains->emplace(
+      kArrayColumnName,
+      createSingleRangeDomain(
+          "array(integer)",
+          bound,
+          protocol::Bound::EXACTLY,
+          bound,
+          protocol::Bound::EXACTLY,
+          false));
+
+  // A scalar domain on the same scan is still pushed down.
+  auto integerBlock = serializeToBlock(
+      BaseVector::createConstant(
+          INTEGER(), variant(int32_t{5}), 1, pool_.get()),
+      pool_.get());
+  layout->domainPredicate.domains->emplace(
+      kColumnName1,
+      createSingleRangeDomain(
+          "integer",
+          integerBlock,
+          protocol::Bound::EXACTLY,
+          integerBlock,
+          protocol::Bound::EXACTLY,
+          false));
+
+  const IcebergPrestoToVeloxConnector icebergConnector("iceberg");
+  auto result = icebergConnector.toVeloxTableHandle(
+      createIcebergTableHandle(layout), *exprConverter_, *typeParser_);
+  auto* handle = dynamic_cast<connector::hive::HiveTableHandle*>(result.get());
+  ASSERT_NE(handle, nullptr);
+
+  EXPECT_EQ(
+      handle->subfieldFilters().count(common::Subfield(kArrayColumnName)), 0);
+  EXPECT_EQ(
+      handle->subfieldFilters().count(common::Subfield(kColumnName1)), 1);
 }
 
 namespace {

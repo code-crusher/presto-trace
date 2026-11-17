@@ -197,9 +197,13 @@ std::unique_ptr<velox::connector::ConnectorTableHandle> toIcebergTableHandle(
   velox::common::SubfieldFilters subfieldFilters;
   auto domains = domainPredicate.domains;
   for (const auto& domain : *domains) {
-    auto filter = domain.second;
-    subfieldFilters[velox::common::Subfield(domain.first)] =
-        toFilter(domain.second, exprConverter, typeParser);
+    auto filter = toFilter(domain.second, exprConverter, typeParser);
+    // Domains Velox cannot evaluate in the scan are left to the remaining
+    // filter.
+    if (filter != nullptr) {
+      subfieldFilters[velox::common::Subfield(domain.first)] =
+          std::move(filter);
+    }
   }
 
   auto remainingFilter = exprConverter.toVeloxExpr(remainingPredicate);
