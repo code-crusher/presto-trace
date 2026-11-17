@@ -30,6 +30,7 @@ import com.facebook.drift.codec.utils.DataSizeToBytesThriftCodec;
 import com.facebook.drift.codec.utils.DurationToMillisThriftCodec;
 import com.facebook.drift.codec.utils.JodaDateTimeToEpochMillisThriftCodec;
 import com.facebook.drift.codec.utils.LocaleToLanguageTagCodec;
+import com.facebook.presto.Session;
 import com.facebook.presto.client.NodeVersion;
 import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.common.type.Type;
@@ -272,6 +273,66 @@ public class TestHttpRemoteTaskWithEventLoop
                 .matches("TaskUpdate size of .+? has exceeded the limit of 1kB");
     }
 
+    @Test(dataProvider = "defaultLimitUpdateSizes", timeOut = 120000)
+    public void testDefaultTaskUpdateSizeLimit(int paddingBytes, boolean expectedToExceed)
+            throws Exception
+    {
+        // Regression test for #28074: the default limit is 32MB, so task updates that used to
+        // fail against the previous 16MB default must now be accepted, while larger updates
+        // must still be rejected.
+        AtomicLong lastActivityNanos = new AtomicLong(System.nanoTime());
+        TestingTaskResource testingTaskResource = new TestingTaskResource(lastActivityNanos, FailureScenario.NO_FAILURE);
+
+        HttpRemoteTaskFactory httpRemoteTaskFactory = createHttpRemoteTaskFactory(testingTaskResource, false);
+
+        RemoteTask remoteTask = createRemoteTask(httpRemoteTaskFactory, sessionWithPadding(paddingBytes));
+        testingTaskResource.setInitialTaskInfo(remoteTask.getTaskInfo());
+        remoteTask.start();
+
+        if (expectedToExceed) {
+            waitUntilTaskFinish(remoteTask);
+            assertThat(getOnlyElement(remoteTask.getTaskStatus().getFailures()).getMessage())
+                    .matches("TaskUpdate size of .+? has exceeded the limit of 32MB");
+        }
+        else {
+            // The update is accepted and delivered to the worker, so no failure is recorded
+            poll(() -> testingTaskResource.getLastTaskUpdateRequest() != null);
+            assertThat(remoteTask.getTaskStatus().getFailures()).isEmpty();
+            assertThat(remoteTask.getTaskStatus().getState()).isNotEqualTo(TaskState.FAILED);
+            remoteTask.cancel();
+            waitUntilTaskFinish(remoteTask);
+        }
+
+        httpRemoteTaskFactory.stop();
+    }
+
+    @DataProvider(name = "defaultLimitUpdateSizes")
+    protected Object[][] defaultLimitUpdateSizes()
+    {
+        return new Object[][] {
+                // Larger than the old 16MB default, smaller than the current 32MB default
+                {20 * 1024 * 1024, false},
+                // Larger than the current 32MB default
+                {34 * 1024 * 1024, true}};
+    }
+
+    /**
+     * Pads the serialized session with many small client tags. A single very large string
+     * would be rejected by the JSON parser's per-string length limit before reaching the
+     * task update size check.
+     */
+    private static Session sessionWithPadding(int paddingBytes)
+    {
+        int tagSize = 1024 * 1024;
+        ImmutableSet.Builder<String> clientTags = ImmutableSet.builder();
+        for (int i = 0; i < paddingBytes / tagSize; i++) {
+            clientTags.add(i + "x".repeat(tagSize - 1));
+        }
+        return Session.builder(TEST_SESSION)
+                .setClientTags(clientTags.build())
+                .build();
+    }
+
     @Test(dataProvider = "getUpdateSize")
     public void testGetExceededTaskUpdateSizeListMessage(int updateSizeInBytes, int maxDataSizeInBytes,
             String expectedMessage)
@@ -344,8 +405,13 @@ public class TestHttpRemoteTaskWithEventLoop
 
     private RemoteTask createRemoteTask(HttpRemoteTaskFactory httpRemoteTaskFactory)
     {
+        return createRemoteTask(httpRemoteTaskFactory, TEST_SESSION);
+    }
+
+    private RemoteTask createRemoteTask(HttpRemoteTaskFactory httpRemoteTaskFactory, Session session)
+    {
         return httpRemoteTaskFactory.createRemoteTask(
-                TEST_SESSION,
+                session,
                 new TaskId("test", 1, 0, 2, 0),
                 new InternalNode("node-id", URI.create("http://fake.invalid/"), new NodeVersion("version"), false),
                 createPlanFragment(),
