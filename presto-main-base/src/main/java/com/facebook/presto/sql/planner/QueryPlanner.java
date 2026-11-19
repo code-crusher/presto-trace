@@ -416,6 +416,7 @@ public class QueryPlanner
         // UPDATEs reach beginMerge through the rewrite below and are unaffected.
         checkV3DeletionVectorRequiresNative(handle, "UPDATE");
         if (!rewriteAsMerge) {
+            checkUpdateNotShippedToNativeWorkers(handle);
             handle = metadata.beginUpdate(session, handle, updatedColumns, analysis.getWritePredicateScope());
         }
 
@@ -783,6 +784,32 @@ public class QueryPlanner
             throw new PrestoException(NOT_SUPPORTED,
                     "Iceberg V3 deletion-vector writes (" + operation + ") require the native (Prestissimo) worker. " +
                             "The Java worker cannot produce Puffin deletion vectors.");
+        }
+    }
+
+    /**
+     * Fails fast when a native (Prestissimo) execution session would plan the legacy
+     * {@link UpdateNode} pipeline, instead of letting the coordinator ship that node to a
+     * native worker. Native workers translate the plan fragment into Velox and have no
+     * UpdateNode translator, so the query dies on the worker with an opaque
+     * {@code ...UpdateNode no abstract type PlanNode} wrapped in a task-update HTTP 500.
+     * The rewrite above turns UPDATE into MergeWriterNode + MergeProcessorNode whenever
+     * the connector/table supports MERGE (Iceberg format-version 2..3 today); every other
+     * target — Iceberg V1, or a connector without beginMerge — is unsupported on native
+     * and gets a clear message here. Java sessions are unaffected: they keep the legacy
+     * COPY_ON_WRITE UpdateNode path, including UPDATE inside explicit transactions.
+     */
+    private void checkUpdateNotShippedToNativeWorkers(TableHandle handle)
+    {
+        // Note: sessions that combine native execution with native_update_merge_enabled=false
+        // never reach this point; LogicalPlanner.createUpdatePlan rejects them first.
+        if (isNativeExecutionEnabled(session)) {
+            throw new PrestoException(NOT_SUPPORTED,
+                    format("UPDATE on the native (Prestissimo) engine is not supported for table %s. " +
+                                    "The native engine executes UPDATE only through the MERGE pipeline, which requires the target " +
+                                    "table to support MERGE (for Iceberg, format-version 2 or 3). Run the query on a Java worker " +
+                                    "cluster, or use a table that supports MERGE.",
+                            metadata.getTableMetadata(session, handle).getTable()));
         }
     }
 
