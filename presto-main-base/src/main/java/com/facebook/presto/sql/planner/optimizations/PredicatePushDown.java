@@ -353,7 +353,9 @@ public class PredicatePushDown
         {
             // candidate symbols for inlining are
             //   1. references to simple constants
-            //   2. references to complex expressions that appear only once
+            //   2. references to identities, i.e. plain variable references, which can be inlined
+            //      any number of times without duplicating any computation
+            //   3. references to complex expressions that appear only once
             // which come from the node, as opposed to an enclosing scope,
             // and the expression does not contain remote functions.
             Set<VariableReferenceExpression> childOutputSet = ImmutableSet.copyOf(node.getOutputVariables());
@@ -362,8 +364,15 @@ public class PredicatePushDown
                     .collect(Collectors.groupingBy(identity(), Collectors.counting()));
 
             return dependencies.entrySet().stream()
-                    .allMatch(entry -> (entry.getValue() == 1 && !node.getAssignments().get(entry.getKey()).accept(new ExternalCallExpressionChecker(functionAndTypeManager), null)) ||
-                            node.getAssignments().get(entry.getKey()) instanceof ConstantExpression);
+                    .allMatch(entry -> {
+                        RowExpression assignment = node.getAssignments().get(entry.getKey());
+                        // Constants and identities can be inlined any number of times: they do not
+                        // duplicate any computation. Complex expressions are only safe to inline
+                        // when they are referenced exactly once.
+                        return assignment instanceof ConstantExpression ||
+                                assignment instanceof VariableReferenceExpression ||
+                                (entry.getValue() == 1 && !assignment.accept(externalCallExpressionChecker, null));
+                    });
         }
 
         @Override

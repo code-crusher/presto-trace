@@ -15,16 +15,27 @@ package com.facebook.presto.sql.planner;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.common.function.OperatorType;
+import com.facebook.presto.spi.ConnectorId;
+import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.plan.Assignments;
 import com.facebook.presto.spi.plan.EquiJoinClause;
 import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.plan.WindowNode;
+import com.facebook.presto.spi.relation.RowExpression;
+import com.facebook.presto.spi.relation.SpecialFormExpression;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.InMemoryExpressionOptimizerProvider;
 import com.facebook.presto.sql.planner.assertions.BasePlanTest;
 import com.facebook.presto.sql.planner.assertions.PlanMatchPattern;
+import com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder;
 import com.facebook.presto.sql.planner.iterative.rule.test.RuleTester;
 import com.facebook.presto.sql.planner.optimizations.PlanOptimizer;
 import com.facebook.presto.sql.planner.optimizations.PredicatePushDown;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
+import com.facebook.presto.testing.TestingTransactionHandle;
+import com.facebook.presto.tpch.TpchColumnHandle;
+import com.facebook.presto.tpch.TpchTableHandle;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
@@ -34,7 +45,12 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.facebook.presto.SystemSessionProperties.GENERATE_DOMAIN_FILTERS;
+import static com.facebook.presto.common.function.OperatorType.MULTIPLY;
+import static com.facebook.presto.common.type.BigintType.BIGINT;
+import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.common.type.IntegerType.INTEGER;
+import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.IN;
+import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.OR;
 import static com.facebook.presto.spi.plan.JoinDistributionType.PARTITIONED;
 import static com.facebook.presto.spi.plan.JoinDistributionType.REPLICATED;
 import static com.facebook.presto.spi.plan.JoinType.INNER;
@@ -53,6 +69,7 @@ import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.semiJo
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
 import static com.facebook.presto.sql.relational.Expressions.constant;
+import static com.facebook.presto.tpch.TpchMetadata.TINY_SCALE_FACTOR;
 import static java.util.Collections.emptyList;
 
 public class TestPredicatePushdown
@@ -484,6 +501,69 @@ public class TestPredicatePushdown
                         "FROM orders" +
                         ") WHERE try(custkey) = 1",
                 anyTree(node(FilterNode.class, anyTree(node(WindowNode.class, anyTree(tableScan("orders")))))));
+    }
+
+    @Test
+    public void testPredicateReferencingIdentityProjectionMultipleTimesIsPushedDown()
+    {
+        RuleTester tester = new RuleTester();
+        PredicatePushDown predicatePushDownOptimizer = new PredicatePushDown(tester.getMetadata(), tester.getSqlParser(), new InMemoryExpressionOptimizerProvider(tester.getMetadata()), false);
+
+        // The projection is a plain identity (x := orderkey), so inlining x into the predicate does not
+        // duplicate any computation, no matter how many times the predicate references it. Such predicates
+        // must reach the source, otherwise connector partition pruning never sees them.
+        // Regression test for https://github.com/prestodb/presto/issues/27813.
+        tester.assertThat(predicatePushDownOptimizer)
+                .on(p -> {
+                    VariableReferenceExpression orderkey = p.variable("orderkey", BIGINT);
+                    VariableReferenceExpression x = p.variable("x", BIGINT);
+                    RowExpression predicate = new SpecialFormExpression(
+                            OR,
+                            BOOLEAN,
+                            p.comparison(OperatorType.EQUAL, x, constant(1L, BIGINT)),
+                            new SpecialFormExpression(IN, BOOLEAN, x, constant(2L, BIGINT), constant(3L, BIGINT)));
+                    return p.filter(predicate,
+                            p.project(
+                                    Assignments.of(x, orderkey),
+                                    ordersTableScan(p, orderkey)));
+                })
+                .matches(
+                        project(ImmutableMap.of("x", expression("orderkey")),
+                                filter("orderkey = BIGINT '1' OR orderkey IN (BIGINT '2', BIGINT '3')",
+                                        tableScan("orders", ImmutableMap.of("orderkey", "orderkey")))));
+
+        // Complex expressions referenced more than once must still be left above the projection, since
+        // inlining them would duplicate their evaluation.
+        tester.assertThat(predicatePushDownOptimizer)
+                .on(p -> {
+                    VariableReferenceExpression orderkey = p.variable("orderkey", BIGINT);
+                    VariableReferenceExpression x = p.variable("x", BIGINT);
+                    RowExpression predicate = new SpecialFormExpression(
+                            OR,
+                            BOOLEAN,
+                            p.comparison(OperatorType.EQUAL, x, constant(1L, BIGINT)),
+                            p.comparison(OperatorType.EQUAL, x, constant(2L, BIGINT)));
+                    return p.filter(predicate,
+                            p.project(
+                                    Assignments.of(x, p.binaryOperation(MULTIPLY, orderkey, constant(2L, BIGINT))),
+                                    ordersTableScan(p, orderkey)));
+                })
+                .matches(
+                        filter("x = BIGINT '1' OR x = BIGINT '2'",
+                                project(ImmutableMap.of("x", expression("orderkey * BIGINT '2'")),
+                                        tableScan("orders", ImmutableMap.of("orderkey", "orderkey")))));
+    }
+
+    private static TableScanNode ordersTableScan(PlanBuilder planBuilder, VariableReferenceExpression orderkey)
+    {
+        return planBuilder.tableScan(
+                new TableHandle(
+                        new ConnectorId("local"),
+                        new TpchTableHandle("orders", TINY_SCALE_FACTOR),
+                        TestingTransactionHandle.create(),
+                        Optional.empty()),
+                ImmutableList.of(orderkey),
+                ImmutableMap.of(orderkey, new TpchColumnHandle("orderkey", BIGINT)));
     }
 
     @Test
