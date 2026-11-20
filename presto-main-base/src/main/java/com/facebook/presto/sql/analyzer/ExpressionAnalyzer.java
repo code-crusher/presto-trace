@@ -732,9 +732,13 @@ public class ExpressionAnalyzer
         @Override
         protected Type visitSimpleCaseExpression(SimpleCaseExpression node, StackableAstVisitorContext<Context> context)
         {
-            for (WhenClause whenClause : node.getWhenClauses()) {
-                coerceToSingleType(context, whenClause, "CASE operand type does not match WHEN clause operand type: %s vs %s", node.getOperand(), whenClause.getOperand());
-            }
+            // The case operand and all when clause operands must be coerced to a single common type.
+            // Coercing the case operand with each when operand separately is not sufficient: the
+            // coercion recorded for the case operand only reflects the last when clause, which can
+            // leave the operands of the other when clauses with a different type.
+            coerceToSingleType(context,
+                    "CASE operand type does not match WHEN clause operand type: %s",
+                    getCaseOperandExpressions(node));
 
             Type type = coerceToSingleType(context,
                     "All CASE results must be the same type: %s",
@@ -747,6 +751,16 @@ public class ExpressionAnalyzer
             }
 
             return type;
+        }
+
+        private List<Expression> getCaseOperandExpressions(SimpleCaseExpression node)
+        {
+            List<Expression> operandExpressions = new ArrayList<>();
+            operandExpressions.add(node.getOperand());
+            for (WhenClause whenClause : node.getWhenClauses()) {
+                operandExpressions.add(whenClause.getOperand());
+            }
+            return operandExpressions;
         }
 
         private List<Expression> getCaseResultExpressions(List<WhenClause> whenClauses, Optional<Expression> defaultValue)
