@@ -1557,7 +1557,12 @@ class StatementAnalyzer
             switch (procedureType) {
                 case TABLE_DATA_REWRITE:
                     TableDataRewriteDistributedProcedure tableDataRewriteDistributedProcedure = (TableDataRewriteDistributedProcedure) procedure;
-                    QualifiedName qualifiedName = QualifiedName.of(tableDataRewriteDistributedProcedure.getSchema(values), tableDataRewriteDistributedProcedure.getTableName(values));
+                    // The target table is managed by the connector that provides the procedure, so it must be
+                    // resolved in the procedure's catalog rather than in the session's catalog.
+                    QualifiedName qualifiedName = QualifiedName.of(
+                            procedureName.getCatalogName(),
+                            tableDataRewriteDistributedProcedure.getSchema(values),
+                            tableDataRewriteDistributedProcedure.getTableName(values));
                     QualifiedObjectName tableName = createQualifiedObjectName(session, call, qualifiedName, metadata);
 
                     analysis.addAccessControlCheckForTable(

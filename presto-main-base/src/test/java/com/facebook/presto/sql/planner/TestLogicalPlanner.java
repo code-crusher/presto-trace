@@ -68,6 +68,9 @@ import com.facebook.presto.testing.TestingHandleResolver;
 import com.facebook.presto.testing.TestingMetadata;
 import com.facebook.presto.testing.TestingSplitManager;
 import com.facebook.presto.tests.QueryTemplate;
+import com.facebook.presto.tpch.TpchHandleResolver;
+import com.facebook.presto.tpch.TpchMetadata;
+import com.facebook.presto.tpch.TpchTransactionHandle;
 import com.facebook.presto.util.MorePredicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -204,7 +207,7 @@ public class TestLogicalPlanner
                     @Override
                     public ConnectorHandleResolver getHandleResolver()
                     {
-                        return new TestingHandleResolver();
+                        return new TpchHandleResolver();
                     }
 
                     @Override
@@ -220,15 +223,16 @@ public class TestLogicalPlanner
                                 (session, transactionContext, procedureHandle, fragments) -> {},
                                 ignored -> new TestProcedureRegistry.TestProcedureContext()));
 
+                        // The `test` catalog serves the TPCH tables so that a distributed procedure registered here
+                        // can be called against a table that lives in this catalog while the session is connected to another one.
                         return new Connector()
                         {
-                            private final ConnectorMetadata metadata = new TestingMetadata();
+                            private final ConnectorMetadata metadata = new TpchMetadata(catalogName);
 
                             @Override
                             public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly)
                             {
-                                return new ConnectorTransactionHandle()
-                                {};
+                                return TpchTransactionHandle.INSTANCE;
                             }
 
                             @Override
@@ -259,6 +263,58 @@ public class TestLogicalPlanner
                         };
                     }
                 }, ImmutableMap.of());
+
+        // Register an empty catalog `other` that has neither the `tiny` schema nor any table, so that
+        // resolving the target table of a distributed procedure in the session catalog is guaranteed to fail
+        this.getQueryRunner().createCatalog("other",
+                new ConnectorFactory()
+                {
+                    @Override
+                    public String getName()
+                    {
+                        return "other";
+                    }
+
+                    @Override
+                    public ConnectorHandleResolver getHandleResolver()
+                    {
+                        return new TestingHandleResolver();
+                    }
+
+                    @Override
+                    public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
+                    {
+                        return new Connector()
+                        {
+                            private final ConnectorMetadata metadata = new TestingMetadata();
+
+                            @Override
+                            public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly)
+                            {
+                                return new ConnectorTransactionHandle()
+                                {};
+                            }
+
+                            @Override
+                            public ConnectorPageSourceProvider getPageSourceProvider()
+                            {
+                                return new TestingPageSourceProvider();
+                            }
+
+                            @Override
+                            public ConnectorMetadata getMetadata(ConnectorTransactionHandle transaction)
+                            {
+                                return metadata;
+                            }
+
+                            @Override
+                            public ConnectorSplitManager getSplitManager()
+                            {
+                                return new TestingSplitManager(ImmutableList.of());
+                            }
+                        };
+                    }
+                }, ImmutableMap.of());
     }
 
     @Test
@@ -270,9 +326,10 @@ public class TestLogicalPlanner
         assertPlanFailedWithException("call test.system.no_fun('a', 'b')", session,
                 format("Distributed procedure not registered: test.system.no_fun", "test", "system", "no_fun"));
 
-        // Call distributed procedure on non-existed target table
+        // Call distributed procedure on non-existed target table.
+        // The target table is resolved in the catalog of the procedure, not in the session catalog.
         assertPlanFailedWithException("call test.system.distributed_fun('tiny', 'notable')", session,
-                format("Table %s.%s.%s does not exist", session.getCatalog().get(), "tiny", "notable"));
+                format("Table %s.%s.%s does not exist", "test", "tiny", "notable"));
 
         // Call distributed procedure on partitioned target table
         assertDistributedPlan("call test.system.distributed_fun('tiny', 'orders')",
@@ -290,6 +347,35 @@ public class TestLogicalPlanner
                                         exchange(LOCAL, GATHER,
                                                 exchange(REMOTE_STREAMING, REPARTITION,
                                                         tableScan("customer"))))))));
+    }
+
+    @Test
+    public void testCallDistributedProcedureFromDifferentSessionCatalog()
+    {
+        // The session is connected to the empty `other` catalog, while both the procedure and its target table live in `test`
+        Session session = Session.builder(getQueryRunner().getDefaultSession())
+                .setCatalog("other")
+                .setSchema("tiny")
+                .build();
+
+        // The target table is looked up in the procedure's catalog even when the session catalog is a different one
+        assertDistributedPlan("call test.system.distributed_fun('tiny', 'orders')", session,
+                anyTree(node(TableFinishNode.class,
+                        exchange(REMOTE_STREAMING, GATHER,
+                                node(CallDistributedProcedureNode.class,
+                                        exchange(LOCAL, GATHER,
+                                                tableScan("orders")))))));
+
+        assertDistributedPlan("call test.system.distributed_fun('tiny', 'customer')", session,
+                anyTree(node(TableFinishNode.class,
+                        exchange(REMOTE_STREAMING, GATHER,
+                                node(CallDistributedProcedureNode.class,
+                                        exchange(LOCAL, GATHER,
+                                                exchange(REMOTE_STREAMING, REPARTITION,
+                                                        tableScan("customer"))))))));
+
+        assertPlanFailedWithException("call test.system.distributed_fun('tiny', 'notable')", session,
+                format("Table %s.%s.%s does not exist", "test", "tiny", "notable"));
     }
     @Test
     public void testAnalyze()

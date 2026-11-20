@@ -495,6 +495,21 @@ public class TestAnalyzer
     }
 
     @Test
+    public void testCallDistributedProcedureFromDifferentSessionCatalog()
+    {
+        // The procedure is registered in the `c2` catalog, while the session is connected to the `tpch` catalog
+        Session session = testSessionBuilder()
+                .setCatalog(TPCH_CATALOG)
+                .setSchema("s1")
+                .build();
+
+        // The target table is resolved in the procedure's catalog, so the `s2` schema is looked up in `c2`, not in `tpch`
+        assertFails(session, MISSING_SCHEMA, "call c2.system.distributed_procedure('s1', 't4')");
+        assertFails(session, MISSING_TABLE, "call c2.system.distributed_procedure('s2', 't9')");
+        analyze(session, "call c2.system.distributed_procedure('s2', 't4')");
+    }
+
+    @Test
     public void testGrouping()
     {
         analyze("SELECT a, b, sum(c), grouping(a, b) FROM t1 GROUP BY GROUPING SETS ((a), (a, b))");

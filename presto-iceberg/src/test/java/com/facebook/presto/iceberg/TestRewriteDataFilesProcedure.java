@@ -91,6 +91,27 @@ public class TestRewriteDataFilesProcedure
     }
 
     @Test
+    public void testRewriteDataFilesWithSessionCatalogDifferentFromProcedureCatalog()
+    {
+        String tableName = "rewrite_with_different_session_catalog";
+        // The procedure and its target table belong to the Iceberg catalog, while the session is connected to another catalog
+        Session session = Session.builder(getSession())
+                .setCatalog("tpch")
+                .setSchema("tiny")
+                .build();
+        try {
+            assertUpdate("CREATE TABLE " + tableName + " (id integer, value varchar)");
+            assertUpdate("INSERT INTO " + tableName + " values(1, 'a'), (2, 'b')", 2);
+
+            assertUpdate(session, format("CALL \"%s\".system.rewrite_data_files('%s', '%s', options => map(array['rewrite-all'], array['true']))", ICEBERG_CATALOG, TEST_SCHEMA, tableName), 2);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (1, 'a'), (2, 'b')");
+        }
+        finally {
+            dropTable(tableName);
+        }
+    }
+
+    @Test
     public void testRewriteDataFilesOnPartitionTable()
     {
         String tableName = "example_partition_table";
