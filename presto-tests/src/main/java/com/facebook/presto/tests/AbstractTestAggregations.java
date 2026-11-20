@@ -578,6 +578,12 @@ public abstract class AbstractTestAggregations
         assertQuery("SELECT CASE 1 WHEN 1 THEN 'x' ELSE orderstatus END, count(*)\n" +
                 "FROM orders\n" +
                 "GROUP BY orderstatus");
+
+        // WHEN operands of differing varchar widths: the CASE operand must be coerced consistently with
+        // every WHEN operand, otherwise the SELECT and GROUP BY sides of the query produce incompatible types
+        assertQuery("SELECT CASE 'default' WHEN 'default' THEN orderstatus WHEN 'hsdfmont' THEN substr(orderstatus, 1, 1) END, count(*)\n" +
+                "FROM orders\n" +
+                "GROUP BY CASE 'default' WHEN 'default' THEN orderstatus WHEN 'hsdfmont' THEN substr(orderstatus, 1, 1) END");
     }
 
     @Test
